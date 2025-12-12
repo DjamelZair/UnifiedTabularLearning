@@ -30,15 +30,15 @@ EXPECTED = {
     "Higgs":     {"n_rows": 75000, "id_start": 4547},
 }
 
-OUTDIR = PROJECT_ROOT / "results_latents_v6"
+OUTDIR = PROJECT_ROOT / "results"
 # Preferred multi-head test predictions file; will fall back to internal-test if missing
-PRED_CSV_PRIMARY   = OUTDIR / "test_predictions_multihead_v6.csv"
-PRED_CSV_FALLBACK  = OUTDIR / "internal_test_predictions_multihead_v6.csv"
+PRED_CSV_PRIMARY   = OUTDIR / "metrics"/"test_predictions_multihead_v6.csv"
+PRED_CSV_FALLBACK  = OUTDIR / "metrics"/"internal_test_predictions_multihead_v7.csv"
 
-SUB_ALL_CSV   = OUTDIR / "submission_multihead_v6.csv"
-SUB_COV_CSV   = OUTDIR / "submission_multihead_v6_covtype.csv"
-SUB_HEL_CSV   = OUTDIR / "submission_multihead_v6_heloc.csv"
-SUB_HIG_CSV   = OUTDIR / "submission_multihead_v6_higgs.csv"
+SUB_ALL_CSV   = OUTDIR / "submissions"/"submission_multihead_v6.csv"
+SUB_COV_CSV   = OUTDIR / "submissions"/"submission_multihead_v6_covtype.csv"
+SUB_HEL_CSV   = OUTDIR / "submissions"/"submission_multihead_v6_heloc.csv"
+SUB_HIG_CSV   = OUTDIR / "submissions"/"submission_multihead_v6_higgs.csv"
 
 TEST_PATHS = {
     "Covertype": DATA_DIR / "covtype_test.csv",

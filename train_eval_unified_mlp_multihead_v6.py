@@ -63,8 +63,8 @@ N_CLASSES_UNION = 11
 TEST_RATIO  = 0.10  # stratified by (dataset,local_class)
 
 # CV and training runtime
-K_FOLDS           = 2    # auto-reduced if a stratum is too small; falls back to single split if impossible
-EPOCHS_MAX        = 2
+K_FOLDS           = 5    # auto-reduced if a stratum is too small; falls back to single split if impossible
+EPOCHS_MAX        = 50
 PATIENCE          = 8
 WARMUP_EPOCHS     = 3
 GRAD_CLIP_NORM    = 1.0

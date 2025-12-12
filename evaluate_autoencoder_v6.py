@@ -18,9 +18,10 @@ except Exception:
     MERGED_DIR   = PROJECT_ROOT / "merged_data"
     MODELS_DIR   = PROJECT_ROOT / "models"
 
-AE_PATH           = MODELS_DIR / "autoencoder.pt"
-TRAIN_UNIFIED_NPZ = MERGED_DIR / "unified_data_v6.npz"
-TEST_LATENTS_NPY  = MERGED_DIR / "test_latents_v6.npy"
+AE_PATH                    = MODELS_DIR / "autoencoder.pt"
+TRAIN_UNIFIED_NPZ          = MERGED_DIR / "unified_data_v6.npz"
+# Keep internal AE hold-out latents separate from Kaggle test latents
+INTERNAL_TEST_LATENTS_NPY  = MERGED_DIR / "internal_test_latents_v6.npy"
 
 # ---------- import trainer types without side effects ----------
 try:
@@ -183,8 +184,8 @@ def evaluate_and_save():
     for k, v in latent_summary.items():
         print(f"{k}: {v}")
 
-    np.save(TEST_LATENTS_NPY, Z.astype(np.float32, copy=False))
-    print(f"\nSaved TEST latents -> {TEST_LATENTS_NPY} with shape {Z.shape}")
+    np.save(INTERNAL_TEST_LATENTS_NPY, Z.astype(np.float32, copy=False))
+    print(f"\nSaved INTERNAL TEST latents -> {INTERNAL_TEST_LATENTS_NPY} with shape {Z.shape}")
 
 def main():
     ensure_trained_autoencoder()

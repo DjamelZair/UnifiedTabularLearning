@@ -58,8 +58,8 @@ MERGE_META_JSON     = MERGED_DIR / "merge_meta_v6.json"
 # ================================
 AUTOENCODER_PATH = MODELS_DIR / "autoencoder.pt"
 ENCODER_PATH     = MODELS_DIR / "encoder.pt"
-MLP_MODEL_PATH   = MODELS_DIR / "mlp_classifier.pt"
-
+MLP_MODEL_SINGLEHEAD = RESULTS_DIR / "results_singlehead/unified_mlp_singlehead_best_v6.pt"
+MLP_MODEL_MULTIHEAD  = RESULTS_DIR / "results_multihead/unified_mlp_multihead_best_v7.pt"
 # ================================
 # Example result files
 # ================================
