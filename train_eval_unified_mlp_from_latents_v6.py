@@ -57,10 +57,10 @@ VAL_RATIO   = 0.20
 TEST_RATIO  = 0.10
 
 # Training controls
-EPOCHS      = 20
-PATIENCE    = 8
+EPOCHS      = 30 # one full pass through the entire training dataset
+PATIENCE    = 8 # used for early stopping to prevent overfitting, safes training time, stops when training reaches a plateau
 USE_AMP     = True
-NUM_WORKERS = 0
+NUM_WORKERS = 2 # Data loading parallelism
 
 HP_DEFAULT = dict(HIDDEN=256, DROPOUT=0.0, LR=1e-3, WEIGHT_DECAY=0.0, BATCH_SIZE=256)
 
@@ -141,9 +141,7 @@ def make_balanced_sampler_by_ds_and_class(ds_ids_subset, y_unified_subset, order
         weights[idx] = 1.0 / max(freq[(d, c)], 1)
     return WeightedRandomSampler(weights, num_samples=len(ds_ids_subset), replacement=True)
 
-# =========================
-# Load latents
-# =========================
+# latents loader
 def load_trainval_latents_and_meta():
     z_path = MERGED_DIR / "trainval_latents_v6.npy"
     meta_p = MERGED_DIR / "unified_data_v6.npz"
@@ -176,9 +174,7 @@ def make_train_val_test_split(Z, y, ds_ids, order, seed=SEED):
             idx_test.extend(rows_c[n_train+n_val:])
     return np.array(idx_train), np.array(idx_val), np.array(idx_test)
 
-# =========================
-# Data & Model
-# =========================
+# data and model
 class UnifiedDataset(Dataset):
     def __init__(self, X, y_unified, ds_ids): self.X=X; self.y=y_unified; self.ds=ds_ids
     def __len__(self): return len(self.X)
@@ -198,9 +194,7 @@ class SingleHead(nn.Module):
         super().__init__(); self.out = nn.Linear(hidden, n_classes)
     def forward(self, h): return self.out(h)
 
-# =========================
-# Evaluation + Plots
-# =========================
+# evaluation and plots
 def slice_logits_for_dataset(logits, ds_name):
     start, length = BLOCKS[ds_name]; return logits[:, start:start+length]
 
@@ -271,9 +265,7 @@ def evaluate_union_and_slices(cfg, order, trunk, head, X, y_u, ds_ids, device,
         "proba": proba,
     }
 
-# =========================
-# Train (single trial, no per-epoch plots)
-# =========================
+# train, single trial
 def train_single(cfg, hp, Xtr, ytr, dstr, Xva, yva, dsva, order, device,
                  epochs, patience):
     set_seed()
@@ -372,9 +364,7 @@ def train_single(cfg, hp, Xtr, ytr, dstr, Xva, yva, dsva, order, device,
 
     return best_state, best_epoch, best_score
 
-# =========================
-# Main
-# =========================
+# main
 def main():
     p_header("ENVIRONMENT")
     p_kv("Python", platform.python_version())
@@ -413,7 +403,7 @@ def main():
     print(f"Saved best checkpoint to {CKPT}")
     print(f"Wrote best config to {TXT_BEST}")
 
-    # ---------- PLOTS ONLY AFTER TRAINING ----------
+    # plots only after training
     trunk = Trunk(Xtr.shape[1], hidden=HP["HIDDEN"], dropout=HP["DROPOUT"]).to(device)
     head  = SingleHead(hidden=HP["HIDDEN"], n_classes=N_CLASSES).to(device)
     trunk.load_state_dict(state["trunk"]); head.load_state_dict(state["head"])
