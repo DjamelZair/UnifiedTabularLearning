@@ -45,9 +45,7 @@ except ModuleNotFoundError:
     make_pred_vs_true_counts = tv.make_pred_vs_true_counts
     make_binary_prob_by_true = tv.make_binary_prob_by_true
 
-# =========================
-# Config (fixed HPs)
-# =========================
+# Configurations
 SEED = 42
 N_CLASSES = 11
 ORDER_DEFAULT = ["Covertype", "Higgs", "HELOC"]
@@ -58,15 +56,15 @@ TRAIN_RATIO = 0.70
 VAL_RATIO   = 0.20
 TEST_RATIO  = 0.10
 
-# Training controls (single trial)
-EPOCHS      = 1
+# Training controls
+EPOCHS      = 20
 PATIENCE    = 8
 USE_AMP     = True
 NUM_WORKERS = 0
 
-HP = dict(HIDDEN=256, DROPOUT=0.0, LR=1e-3, WEIGHT_DECAY=0.0, BATCH_SIZE=256)
+HP_DEFAULT = dict(HIDDEN=256, DROPOUT=0.0, LR=1e-3, WEIGHT_DECAY=0.0, BATCH_SIZE=256)
 
-# ---- output locations
+# output locations
 RESULTS_DIR = PROJECT_ROOT / "results"
 PLOTS_DIR   = RESULTS_DIR / "plots"        # figures here
 METRICS_DIR = RESULTS_DIR / "metrics"      # csv metrics here
@@ -79,6 +77,28 @@ TXT_BEST = OUTDIR / "best_config_v6.txt"
 CSV_INT_TEST_SUMMARY = METRICS_DIR / "internal_test_summary_v6.csv"
 CSV_INT_TEST_PRED    = METRICS_DIR / "internal_test_predictions_v6.csv"
 CSV_TRAIN_CURVE      = METRICS_DIR / "training_curve_v6.csv"
+
+
+def load_best_hp(txt_path: Path, fallback: dict) -> dict:
+    """Load HPs from best_config file if present; otherwise return fallback defaults."""
+    hp = dict(fallback)
+    if not txt_path.exists():
+        return hp
+    for line in txt_path.read_text().splitlines():
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip().upper()
+        if key not in hp:
+            continue
+        v = val.strip()
+        try:
+            hp[key] = int(v) if v.isdigit() else float(v)
+        except ValueError:
+            hp[key] = v
+    return hp
+
+HP = load_best_hp(TXT_BEST, HP_DEFAULT)
 
 # =========================
 # Small helpers (quiet)
