@@ -1,11 +1,11 @@
 # TABSTER2/train_eval_unified_mlp_multihead_kfold_v7.py
 # Robust multi-head MLP on AE latents with:
-# - Stratified TEST hold-out (by dataset & local class)
-# - Stratified K-Fold CV on TrainVal for HP selection
-# - Early stopping per-fold; final refit on all TrainVal for fixed epochs = median(best_epoch)
-# - Balanced sampling + class-weighted losses per dataset head
-# - NO plots during training; ONLY once for final (Val-on-refit + Test)
-# - Leak-tight: Test unseen until the very end; no val used during refit
+# • Stratified TEST hold-out (by dataset & local class)
+# • Stratified K-Fold CV on TrainVal for HP selection
+# • Early stopping per-fold; final refit on all TrainVal for fixed epochs = median(best_epoch)
+# • Balanced sampling + class-weighted losses per dataset head
+# • NO plots during training; ONLY once for final (Val-on-refit + Test)
+# • Leak-tight: Test unseen until the very end; no val used during refit
 
 import sys, os, platform, math, warnings, json, time, random
 from pathlib import Path
@@ -63,18 +63,17 @@ N_CLASSES_UNION = 11
 TEST_RATIO  = 0.10  # stratified by (dataset,local_class)
 
 # CV and training runtime
-K_FOLDS           = 2    # auto-reduced if a stratum is too small
-EPOCHS_MAX        = 1
+K_FOLDS           = 2    # auto-reduced if a stratum is too small; falls back to single split if impossible
+EPOCHS_MAX        = 2
 PATIENCE          = 8
 WARMUP_EPOCHS     = 3
 GRAD_CLIP_NORM    = 1.0
 USE_AMP           = True
 NUM_WORKERS       = 0
 
-# Print per-epoch validation metrics (no plots)
+# Print controls
 PRINT_EPOCH_METRICS = True
 EPOCH_LOG_EVERY     = 1
-
 PLOT_AFTER_FINAL_ONLY = True
 
 # Base & grid
@@ -85,18 +84,25 @@ HP_GRID = [
     dict(HIDDEN=384, DROPOUT=0.10, LR=7e-4,  WEIGHT_DECAY=1e-5, BATCH_SIZE=256),
     dict(HIDDEN=192, DROPOUT=0.00, LR=1.2e-3,WEIGHT_DECAY=0.0,  BATCH_SIZE=256),
 ]
-
 MODEL_TAG = "[Multi-Head MLP]"
 
-# ---- outputs
-PLOTS  = PROJECT_ROOT / "plots"
-OUTDIR = PROJECT_ROOT / "results_latents_v7"
+# =========================
+# Output locations
+# =========================
+RESULTS_DIR = PROJECT_ROOT / "results"
+PLOTS_DIR   = RESULTS_DIR / "plots"       # figures here
+METRICS_DIR = RESULTS_DIR / "metrics"     # csv metrics here
+
+# Keep checkpoints here to avoid breaking existing paths
+OUTDIR = RESULTS_DIR / "results_multihead"
 CKPT   = OUTDIR / "unified_mlp_multihead_best_v7.pt"
 TXT_BEST = OUTDIR / "best_config_multihead_v7.txt"
-CSV_INT_TEST_SUMMARY = OUTDIR / "internal_test_summary_multihead_v7.csv"
-CSV_INT_TEST_PRED    = OUTDIR / "internal_test_predictions_multihead_v7.csv"
-CSV_TRIALS_LOG       = OUTDIR / "multihead_grid_results_v7.csv"
-CSV_TRIALS_FOLDS     = OUTDIR / "multihead_grid_folds_v7.csv"
+
+# All CSVs go to metrics
+CSV_INT_TEST_SUMMARY = METRICS_DIR / "internal_test_summary_multihead_v7.csv"
+CSV_INT_TEST_PRED    = METRICS_DIR / "internal_test_predictions_multihead_v7.csv"
+CSV_TRIALS_LOG       = METRICS_DIR / "multihead_grid_results_v7.csv"
+CSV_TRIALS_FOLDS     = METRICS_DIR / "multihead_grid_folds_v7.csv"
 
 # =========================
 # Utility
@@ -158,16 +164,36 @@ def stratified_test_holdout(ds_ids, y, order, test_ratio=TEST_RATIO, seed=SEED):
             rc = rows[y_local == c]
             rng.shuffle(rc)
             n_test = max(1, int(round(len(rc) * test_ratio)))
+            n_test = min(n_test, len(rc) - 1) if len(rc) > 1 else 1
             idx_test.extend(rc[:n_test])
             idx_rest.extend(rc[n_test:])
     return np.array(idx_rest), np.array(idx_test)
 
+def stratified_train_val_split(ds_ids, y, order, val_ratio=0.20, seed=SEED):
+    """Return indices for a stratified single Train/Val split across (dataset, local_class)."""
+    rng = np.random.default_rng(seed)
+    idx_val, idx_train = [], []
+    for i, ds_name in enumerate(order):
+        rows = np.where(ds_ids == i)[0]
+        y_local = to_local(y[rows], ds_name)
+        for c in np.unique(y_local):
+            rc = rows[y_local == c]
+            rng.shuffle(rc)
+            n_val = max(1, int(round(len(rc) * val_ratio))) if len(rc) > 1 else 1
+            n_val = min(n_val, len(rc) - 1) if len(rc) > 1 else 1
+            idx_val.extend(rc[:n_val])
+            idx_train.extend(rc[n_val:])
+    return np.array(idx_train), np.array(idx_val)
+
 def auto_adjust_kfold(trainval_idx, y, ds_ids, order, requested_k=K_FOLDS):
     lab = make_strat_label(y[trainval_idx], ds_ids[trainval_idx], order)
     _, cnts = np.unique(lab, return_counts=True)
-    min_stratum = int(cnts.min()) if len(cnts) else 1
-    K = max(2, min(requested_k, min_stratum))
-    return K
+    if len(cnts) == 0:
+        return 0
+    min_stratum = int(cnts.min())
+    if min_stratum < 2:
+        return 0  # signal: cannot do KFold safely
+    return min(requested_k, min_stratum)
 
 # =========================
 # Dataset & Sampler
@@ -187,7 +213,7 @@ def make_balanced_sampler_by_ds_and_class(ds_ids_subset, y_unified_subset, order
     freq = {}
     for i, name in enumerate(order):
         mask = (ds_ids_subset == i)
-        if not np.any(mask): 
+        if not np.any(mask):
             continue
         yloc = to_local(y_unified_subset[mask], name)
         vals, cnts = np.unique(yloc, return_counts=True)
@@ -367,7 +393,8 @@ def train_one_epoch(trunk, heads, criterion, opt, loader, device, order, scaler,
             for i, name in enumerate(order):
                 mask = (dsb == i)
                 if not torch.any(mask): continue
-                y_loc = to_local(yb_u[mask].cpu().numpy(), name)
+                # convert target slice to local class indices
+                y_loc = to_local(yb_u[mask].detach().cpu().numpy(), name)
                 y_loc = torch.tensor(y_loc, dtype=torch.long, device=device)
                 if name == "Covertype":
                     L += loss_cov(logit[name][mask], y_loc); parts += 1
@@ -395,23 +422,30 @@ def train_fold_with_early_stopping(hp, Xtr, ytr, dstr, Xva, yva, dsva, order, de
 
     best = {"score": -math.inf, "epoch": 0, "state": None, "val": None}
     no_improve = 0
-    for epoch in range(1, EPOCHS_MAX + 1):
+
+    ep_bar = tqdm(range(1, EPOCHS_MAX + 1), desc=f"{log_prefix} epochs",
+                  leave=False, position=2, dynamic_ncols=True, ascii=True)
+    for epoch in ep_bar:
         _ = train_one_epoch(trunk, heads, (lc, lh, ll), opt, train_ld, device, order, scaler, autocast_ctx)
-        # one pass validation
+
         res = evaluate_multi(SimpleNamespace(save_png=None),
                              order, trunk, heads, Xva, yva, dsva, device, make_plots=False)
         score = res["mean_f1"]
 
+        cov = res["per_ds"].get("Covertype", {"acc": float("nan"), "f1_macro": float("nan")})
+        hig = res["per_ds"].get("Higgs",    {"acc": float("nan"), "f1_macro": float("nan")})
+        hel = res["per_ds"].get("HELOC",    {"acc": float("nan"), "f1_macro": float("nan")})
+        ep_bar.set_postfix({
+            "mean_f1": f"{score:.4f}",
+            "cov_f1":  f"{cov['f1_macro']:.4f}",
+            "hig_f1":  f"{hig['f1_macro']:.4f}",
+            "hel_f1":  f"{hel['f1_macro']:.4f}",
+        })
+
         if PRINT_EPOCH_METRICS and (epoch % EPOCH_LOG_EVERY == 0):
-            cov = res["per_ds"].get("Covertype", {"acc": float("nan"), "f1_macro": float("nan")})
-            hig = res["per_ds"].get("Higgs",    {"acc": float("nan"), "f1_macro": float("nan")})
-            hel = res["per_ds"].get("HELOC",    {"acc": float("nan"), "f1_macro": float("nan")})
             tqdm.write(
                 f"{log_prefix} epoch {epoch:03d} | "
-                f"val mean_f1={score:.4f} | union_acc={res['union_acc']:.4f} union_f1={res['union_f1']:.4f} | "
-                f"cov_f1={cov['f1_macro']:.4f} cov_acc={cov['acc']:.4f} | "
-                f"hig_f1={hig['f1_macro']:.4f} hig_acc={hig['acc']:.4f} | "
-                f"hel_f1={hel['f1_macro']:.4f} hel_acc={hel['acc']:.4f}"
+                f"val mean_f1={score:.4f} | union_acc={res['union_acc']:.4f} union_f1={res['union_f1']:.4f}"
             )
 
         if score > best["score"]:
@@ -420,12 +454,13 @@ def train_fold_with_early_stopping(hp, Xtr, ytr, dstr, Xva, yva, dsva, order, de
             best["state"] = {"trunk": trunk.state_dict(), "heads": heads.state_dict(), "config": {**hp}}
             best["val"]   = res
             no_improve = 0
-            tqdm.write(f"★ fold new best mean_f1={score:.4f} at epoch {epoch}")
+            tqdm.write(f"★ {log_prefix} new best mean_f1={score:.4f} at epoch {epoch}")
         else:
             no_improve += 1
             if epoch >= max(WARMUP_EPOCHS, 1) and no_improve >= PATIENCE:
-                tqdm.write(f"Early stopping at epoch {epoch} (no improve {PATIENCE})")
+                tqdm.write(f"{log_prefix} early stopping at epoch {epoch} (no improve {PATIENCE})")
                 break
+    ep_bar.close()
     return best
 
 def train_fixed_epochs(hp, Xtr, ytr, dstr, order, device, epochs_fixed):
@@ -435,25 +470,41 @@ def train_fixed_epochs(hp, Xtr, ytr, dstr, order, device, epochs_fixed):
                           drop_last=False, **get_loader_kwargs(device))
     trunk, heads, lc, lh, ll, opt = make_model_and_opt(hp, Xtr.shape[1], device, ytr, dstr, order)
     scaler, autocast_ctx = _amp_helpers(device, USE_AMP)
-    for _epoch in tqdm(range(1, max(1, epochs_fixed) + 1), leave=False, desc="final_refit_epochs"):
+    for _epoch in tqdm(range(1, max(1, epochs_fixed) + 1),
+                       leave=False, desc="final_refit_epochs", position=2,
+                       dynamic_ncols=True, ascii=True):
         _ = train_one_epoch(trunk, heads, (lc, lh, ll), opt, train_ld, device, order, scaler, autocast_ctx)
     return trunk, heads
 
 # =========================
-# Grid search with K-Fold CV
+# Grid search with K-Fold CV or single split fallback
 # =========================
 def run_grid_kfold(hp_grid, X, y, ds_ids, order, device, k_folds):
     trials = []
     fold_rows = []
     best_overall = {"score": -math.inf, "trial_idx": -1, "hp": None, "fold_epochs": None}
 
-    strat_labels = make_strat_label(y, ds_ids, order)
-    skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=SEED)
+    # Either create K-Fold splits or one stratified Train/Val split
+    if k_folds >= 2:
+        strat_labels = make_strat_label(y, ds_ids, order)
+        skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=SEED)
+        splits = list(skf.split(X, strat_labels))
+        cv_mode = True
+    else:
+        tr_idx, va_idx = stratified_train_val_split(ds_ids, y, order, val_ratio=0.20, seed=SEED+11)
+        splits = [(tr_idx, va_idx)]
+        cv_mode = False
+        tqdm.write("[CV] Not enough samples per stratum for K-Fold. Falling back to a single stratified Train/Val split.")
 
-    for i, hp in enumerate(hp_grid, start=1):
+    # outer bar for trials
+    for i, hp in enumerate(tqdm(HP_GRID, desc="Trials", position=0, leave=True,
+                                dynamic_ncols=True, ascii=True), start=1):
         fold_scores, fold_epochs = [], []
         t0_trial = time.time()
-        for f, (tr_idx, va_idx) in enumerate(skf.split(X, strat_labels), start=1):
+
+        # inner bar for folds
+        for f, (tr_idx, va_idx) in enumerate(tqdm(splits, desc=f"Trial {i} folds",
+                                                  position=1, leave=False, dynamic_ncols=True, ascii=True), start=1):
             set_seed(SEED + f + i * 37)
             Xtr, ytr, dstr = X[tr_idx], y[tr_idx], ds_ids[tr_idx]
             Xva, yva, dsva = X[va_idx], y[va_idx], ds_ids[va_idx]
@@ -476,19 +527,18 @@ def run_grid_kfold(hp_grid, X, y, ds_ids, order, device, k_folds):
 
         dt = time.time() - t0_trial
         mean_score = float(np.mean(fold_scores)) if fold_scores else float("-inf")
-        std_score  = float(np.std(fold_scores))  if fold_scores else float("inf")
+        std_score  = float(np.std(fold_scores))  if (fold_scores and cv_mode) else 0.0
         med_epoch  = int(np.median(fold_epochs)) if fold_epochs else 1
 
         trials.append({
             "trial": i,
             "HIDDEN": hp["HIDDEN"], "DROPOUT": hp["DROPOUT"],
             "LR": hp["LR"], "WEIGHT_DECAY": hp["WEIGHT_DECAY"], "BATCH_SIZE": hp["BATCH_SIZE"],
-            "k": k_folds,
+            "k": len(splits),
             "cv_mean_f1": mean_score, "cv_std_f1": std_score, "cv_median_epoch": med_epoch,
             "secs": dt,
         })
 
-        # Selection: higher mean_f1, tie-break lower std, then faster
         is_better = (mean_score > best_overall["score"]) or (
             math.isclose(mean_score, best_overall["score"], rel_tol=1e-6) and
             (std_score < best_overall.get("cv_std_f1", float("inf")) or
@@ -514,10 +564,14 @@ def main():
     print(f"[Using device] {device}", flush=True)
 
     set_seed()
-    PLOTS.mkdir(parents=True, exist_ok=True)
+
+    # ensure output dirs
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    METRICS_DIR.mkdir(parents=True, exist_ok=True)
     OUTDIR.mkdir(parents=True, exist_ok=True)
+
     configure_matplotlib()
-    save_png = make_saver(PLOTS, tag="v7_multihead")
+    save_png = make_saver(PLOTS_DIR, tag="v7_multihead")
 
     # Data
     Z, y, ds_ids, order = load_trainval_latents_and_meta()
@@ -527,18 +581,21 @@ def main():
     Xtv, ytv, dstv = Z[idx_trainval], y[idx_trainval], ds_ids[idx_trainval]
     Xte, yte, dste = Z[idx_test],       y[idx_test],   ds_ids[idx_test]
 
-    # Auto-calibrate K
+    # Auto-calibrate K, with safe fallback
     k_folds = auto_adjust_kfold(idx_trainval, y, ds_ids, order, requested_k=K_FOLDS)
-    print(f"[CV] Using K={k_folds} folds.", flush=True)
+    if k_folds >= 2:
+        print(f"[CV] Using K={k_folds} folds.", flush=True)
+    else:
+        print("[CV] Using a single stratified Train/Val split (insufficient samples per stratum for K-Fold).", flush=True)
 
-    # Grid search via K-Fold CV
+    # Grid search
     best_overall, trials_df, folds_df = run_grid_kfold(HP_GRID, Xtv, ytv, dstv, order, device, k_folds)
     trials_df.to_csv(CSV_TRIALS_LOG, index=False)
     folds_df.to_csv(CSV_TRIALS_FOLDS, index=False)
     print(f"Saved trials log to {CSV_TRIALS_LOG}")
     print(f"Saved per-fold log to {CSV_TRIALS_FOLDS}")
 
-    # Best HP & fixed-epoch refit on ALL TrainVal (no validation = no leakage)
+    # Refit on ALL TrainVal with fixed epochs
     hp = best_overall["hp"] if best_overall["hp"] is not None else BASE_HP
     best_epoch_median = int(np.median(best_overall["fold_epochs"])) if best_overall["fold_epochs"] else 1
     print(f"[REFIT] Best HP: {hp} | fixed_epochs={best_epoch_median}", flush=True)
@@ -551,7 +608,7 @@ def main():
         f.write("Best HP configuration (multihead v7)\n")
         f.write(json.dumps(hp, indent=2))
         f.write(f"\nMedian best epoch across folds: {best_epoch_median}\n")
-        f.write(f"CV mean_f1: {best_overall['score']:.6f} ± {best_overall.get('cv_std_f1', float('nan')):.6f}\n")
+        f.write(f"CV mean_f1: {best_overall['score']:.6f} ± {best_overall.get('cv_std_f1', 0.0):.6f}\n")
     print(f"Saved best checkpoint to {CKPT}")
     print(f"Wrote best config to {TXT_BEST}")
 
@@ -564,11 +621,11 @@ def main():
 
     # Test with plots ONCE
     print("\n" + "="*80 + "\nTEST EVALUATION\n" + "="*80, flush=True)
-    res_te = evaluate_multi(SimpleNamespace(save_png=make_saver(PLOTS, tag="v7_multihead")),
+    res_te = evaluate_multi(SimpleNamespace(save_png=make_saver(PLOTS_DIR, tag="v7_multihead")),
                             order, trunk, heads, Xte, yte, dste, device,
                             make_plots=True, name_prefix="TEST")
 
-    # Save test CSVs
+    # Save test CSVs to metrics
     pred_df = pd.DataFrame({
         "dataset_id": dste,
         "y_true_unified": yte.astype(int),
@@ -592,3 +649,4 @@ def main():
 if __name__ == "__main__":
     warnings.filterwarnings("ignore", category=UserWarning)
     main()
+

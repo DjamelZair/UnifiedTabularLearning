@@ -59,7 +59,7 @@ VAL_RATIO   = 0.20
 TEST_RATIO  = 0.10
 
 # Training controls (single trial)
-EPOCHS      = 50
+EPOCHS      = 1
 PATIENCE    = 8
 USE_AMP     = True
 NUM_WORKERS = 0
@@ -67,12 +67,18 @@ NUM_WORKERS = 0
 HP = dict(HIDDEN=256, DROPOUT=0.0, LR=1e-3, WEIGHT_DECAY=0.0, BATCH_SIZE=256)
 
 # ---- output locations
-PLOTS  = PROJECT_ROOT / "plots"
-OUTDIR = PROJECT_ROOT / "results_latents_v6"
+RESULTS_DIR = PROJECT_ROOT / "results"
+PLOTS_DIR   = RESULTS_DIR / "plots"        # figures here
+METRICS_DIR = RESULTS_DIR / "metrics"      # csv metrics here
+
+# keep checkpoints here unless you want them moved as well
+OUTDIR = RESULTS_DIR / "results_singlehead"
 CKPT   = OUTDIR / "unified_mlp_singlehead_best_v6.pt"
 TXT_BEST = OUTDIR / "best_config_v6.txt"
-CSV_INT_TEST_SUMMARY = OUTDIR / "internal_test_summary_v6.csv"
-CSV_INT_TEST_PRED    = OUTDIR / "internal_test_predictions_v6.csv"
+
+CSV_INT_TEST_SUMMARY = METRICS_DIR / "internal_test_summary_v6.csv"
+CSV_INT_TEST_PRED    = METRICS_DIR / "internal_test_predictions_v6.csv"
+CSV_TRAIN_CURVE      = METRICS_DIR / "training_curve_v6.csv"
 
 # =========================
 # Small helpers (quiet)
@@ -280,6 +286,9 @@ def train_single(cfg, hp, Xtr, ytr, dstr, Xva, yva, dsva, order, device,
     best_epoch = 0
     no_improve = 0
 
+    # per-epoch logging to metrics file
+    log_rows = []
+
     ep_iter = tqdm(range(1, epochs + 1), desc=f"Trial 1", leave=True)
     for epoch in ep_iter:
         trunk.train(); head.train()
@@ -288,7 +297,7 @@ def train_single(cfg, hp, Xtr, ytr, dstr, Xva, yva, dsva, order, device,
             opt.zero_grad(set_to_none=True)
             with autocast_ctx():
                 logits = head(trunk(Xb))
-                loss = loss_fn(logits, yb)
+                loss = nn.functional.cross_entropy(logits, yb, weight=w)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
@@ -301,6 +310,15 @@ def train_single(cfg, hp, Xtr, ytr, dstr, Xva, yva, dsva, order, device,
                              "cov": f"{res['per_ds'].get('Covertype',{}).get('f1_macro',float('nan')):.4f}",
                              "hig": f"{res['per_ds'].get('Higgs',{}).get('f1_macro',float('nan')):.4f}",
                              "hel": f"{res['per_ds'].get('HELOC',{}).get('f1_macro',float('nan')):.4f}"})
+
+        # collect per-epoch metrics
+        log_rows.append({
+            "epoch": int(epoch),
+            "mean_f1": float(score),
+            "cov_f1": float(res["per_ds"].get("Covertype",{}).get("f1_macro", np.nan)),
+            "hig_f1": float(res["per_ds"].get("Higgs",{}).get("f1_macro", np.nan)),
+            "hel_f1": float(res["per_ds"].get("HELOC",{}).get("f1_macro", np.nan)),
+        })
 
         if score > best_score:
             best_score = score
@@ -315,15 +333,22 @@ def train_single(cfg, hp, Xtr, ytr, dstr, Xva, yva, dsva, order, device,
             }
             best_epoch = epoch
             no_improve = 0
-            tqdm.write(f"★ Trial 1 epoch {epoch} new best mean_f1={best_score:.4f}  "
-                       f"[Cov {res['per_ds'].get('Covertype',{}).get('f1_macro',float('nan')):.4f} | "
-                       f"HIG {res['per_ds'].get('Higgs',{}).get('f1_macro',float('nan')):.4f} | "
-                       f"HEL {res['per_ds'].get('HELOC',{}).get('f1_macro',float('nan')):.4f}]")
+            tqdm.write(
+                f"★ Trial 1 epoch {epoch} new best mean_f1={best_score:.4f}  "
+                f"[Cov {res['per_ds'].get('Covertype',{}).get('f1_macro',float('nan')):.4f} | "
+                f"HIG {res['per_ds'].get('Higgs',{}).get('f1_macro',float('nan')):.4f} | "
+                f"HEL {res['per_ds'].get('HELOC',{}).get('f1_macro',float('nan')):.4f}]"
+            )
         else:
             no_improve += 1
             if no_improve >= patience:
                 tqdm.write(f"Early stopping Trial 1 at epoch {epoch}")
                 break
+
+    # write per-epoch training curve
+    if log_rows:
+        METRICS_DIR.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(log_rows).to_csv(CSV_TRAIN_CURVE, index=False)
 
     return best_state, best_epoch, best_score
 
@@ -339,10 +364,14 @@ def main():
     p_kv("Using device", device)
 
     set_seed()
-    PLOTS.mkdir(parents=True, exist_ok=True)
+
+    # ensure directories
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    METRICS_DIR.mkdir(parents=True, exist_ok=True)
     OUTDIR.mkdir(parents=True, exist_ok=True)
+
     configure_matplotlib()
-    save_png = make_saver(PLOTS, tag="v6")
+    save_png = make_saver(PLOTS_DIR, tag="v6")
 
     Z, y, ds_ids, order = load_trainval_latents_and_meta()
     idx_tr, idx_va, idx_te = make_train_val_test_split(Z, y, ds_ids, order)
@@ -372,7 +401,7 @@ def main():
                               order, trunk, head, Xva, yva, dsva, device,
                               make_plots=True, name_prefix="VALIDATION")
     p_header("INTERNAL TEST EVALUATION")
-    res_te = evaluate_union_and_slices(SimpleNamespace(save_png=make_saver(PLOTS, tag="v6")),
+    res_te = evaluate_union_and_slices(SimpleNamespace(save_png=make_saver(PLOTS_DIR, tag="v6")),
                                        order, trunk, head, Xte, yte, dste, device,
                                        make_plots=True, name_prefix="INTERNAL TEST")
 
@@ -395,6 +424,7 @@ def main():
     pd.DataFrame(rows, columns=["metric","value"]).to_csv(CSV_INT_TEST_SUMMARY, index=False)
     print(f"Saved internal test predictions to {CSV_INT_TEST_PRED}")
     print(f"Saved internal test summary to {CSV_INT_TEST_SUMMARY}")
+    print(f"Saved training curve to {CSV_TRAIN_CURVE}")
 
 if __name__ == "__main__":
     warnings.filterwarnings("ignore", category=UserWarning)
