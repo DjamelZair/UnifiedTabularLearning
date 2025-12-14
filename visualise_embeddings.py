@@ -27,11 +27,14 @@ TSNE_SEED       = 42
 COLOR_PALETTE = [
     "#267d21ff",  # covtype
     "#d5cb4b",  # higgs
-    "#155965",  # heloc
+    "#4f99cf",  # heloc
+    # "covtype":   "#267d21ff",
+    # "higgs":     "#d5cb4b",
+    # "heloc":     "#4f99cf",
 ]
 
 # For speed: optionally subsample points before t-SNE
-MAX_POINTS = 20000  # set None to use all points (can be very slow)
+MAX_POINTS = None # 20000  # set None to use all points (can be very slow)
 
 # ----------------- paths -----------------
 try:
@@ -156,7 +159,7 @@ def main():
     plt.title("t-SNE of Shared Latent Representations Across Tabular Datasets")
     plt.xlabel("t-SNE 1")
     plt.ylabel("t-SNE 2")
-    plt.legend(markerscale=3)
+    plt.legend(markerscale=7, fontsize=18)
     plt.tight_layout()
 
     out_png = MERGED_DIR / "tsne_latents_v6.png"
